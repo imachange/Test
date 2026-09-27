@@ -55,8 +55,6 @@ jobs:
 
             return setupIssueNumber;
 
-      # 追加予定
-
       - name: 新規ブランチの作成、init.yamlの削除、およびプッシュ
         if: github.ref == 'refs/heads/main'
         run: |
@@ -64,12 +62,16 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           BRANCH_NAME="chore/1-init-repository"
-          git checkout -b "$BRANCH_NAME"
+          
+          # 既にブランチが存在する場合の考慮
+          git checkout -b "$BRANCH_NAME" || git checkout "$BRANCH_NAME"
 
           # ワークフローファイルを削除してコミット＆プッシュ
-          git rm .github/workflows/init.yaml
-          git commit -m "chore: リポジトリ初期化 #1"
-          git push origin "$BRANCH_NAME"
+          git rm .github/workflows/init.yaml || echo "File already deleted"
+          git commit -m "chore: リポジトリ初期化 #1" || echo "No changes to commit"
+          
+          # 【対策】--force-with-lease を使って安全にリモートブランチを上書き（リトライ対応）
+          git push origin "$BRANCH_NAME" --force-with-lease
 
       - name: プルリクエストの作成
         if: github.ref == 'refs/heads/main'
@@ -83,12 +85,32 @@ jobs:
             const setupIssueNumber = process.env.SETUP_ISSUE_NUMBER?.trim();
             const closeIssueText = setupIssueNumber ? `\n\nclose #${setupIssueNumber}` : '';
 
-            await github.rest.pulls.create({
-              owner,
-              repo,
-              title: '🚀 テンプレート初期化と不要ワークフローの削除',
-              head: 'chore/1-init-repository',
-              base: defaultBranch,
-              body: `テンプレートリポジトリから新規作成されたため、初期化タスクの自動作成と、不要になった \`init.yaml\` を削除するプルリクエストです。\n\n内容を確認してマージしてください。${closeIssueText}`
-            });
-            console.log('プルリクエストを作成しました。');
+            try {
+              await github.rest.pulls.create({
+                owner,
+                repo,
+                title: '🚀 テンプレート初期化と不要ワークフローの削除',
+                head: 'chore/1-init-repository',
+                base: defaultBranch,
+                body: `テンプレートリポジトリから新規作成されたため、初期化タスクの自動作成と、不要になった \`init.yaml\` を削除するプルリクエストです。\n\n内容を確認してマージしてください。${closeIssueText}`
+              });
+              console.log('プルリクエストを作成しました。');
+            } catch (error) {
+              console.error('プルリクエストの作成に失敗しました:', error.message);
+
+              // 【対策】権限エラー（403等）を検知した場合、初期化Issueに親切な解説コメントを投稿する
+              if ((error.status === 403 || error.message.includes('not permitted')) && setupIssueNumber) {
+                const commentBody = `⚠️ **【自動通知】初期化ワークフローの実行に失敗しました。**`;
+
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: Number(setupIssueNumber),
+                  body: commentBody
+                });
+                console.log(`Issue #${setupIssueNumber} にエラー案内コメントを投稿しました。`);
+              }
+
+              // ワークフローを失敗させる
+              throw error;
+            }
